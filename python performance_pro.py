@@ -1,21 +1,15 @@
 # -*- coding: utf-8 -*-
 # ==============================================================================
-#  专业版业绩与绩效奖励统计程序 (Performance Tracker Pro)
-#  作者: Gemini
-#  版本: 2.0
-#  功能: 数据持久化, 历史数据修改, 彩色UI, 智能进度跟踪
+#  业绩与绩效奖励统计程序 (网页版 V2 - 使用Session State)
 # ==============================================================================
-
+import streamlit as st
 import json
 import os
-import sys
-from colorama import init, Fore, Style
+import pandas as pd
 
-# -- 初始化Colorama，让颜色在所有平台(Windows, Mac, Linux)上都能正常工作 --
-init(autoreset=True)
-
+# --- 配置 ---
 class Config:
-    """存放所有配置和常量"""
+    # ... (Config类内容保持不变) ...
     DATA_FILE = "performance_data.json"
     START_YEAR = 2025
     START_MONTH = 2
@@ -25,225 +19,99 @@ class Config:
     SURPLUS_BONUS_THRESHOLD = 100000.0
     SURPLUS_BONUS_AMOUNT = 10000.0
 
-class Display:
-    """用于格式化和彩色打印的辅助类"""
-    @staticmethod
-    def header(text):
-        print(Fore.CYAN + Style.BRIGHT + f"\n{'='*10} {text} {'='*10}")
 
-    @staticmethod
-    def sub_header(text):
-        print(Fore.YELLOW + f"\n--- {text} ---")
+# --- 数据加载/保存函数 ---
+def load_data():
+    if os.path.exists(Config.DATA_FILE):
+        with open(Config.DATA_FILE, 'r', encoding='utf-8') as f:
+            return {int(k): v for k, v in json.load(f).items()}
+    return {}
 
-    @staticmethod
-    def success(text):
-        print(Fore.GREEN + text)
+def save_data(records):
+    with open(Config.DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(records, f, ensure_ascii=False, indent=4)
 
-    @staticmethod
-    def error(text):
-        print(Fore.RED + text)
+# --- 主应用界面 ---
+st.set_page_config(page_title="业绩跟踪程序", layout="wide")
+st.title(f"📈 {Config.START_YEAR}年度业绩与绩效跟踪程序")
 
-    @staticmethod
-    def info(text):
-        print(Fore.BLUE + text)
-        
-    @staticmethod
-    def prompt(text):
-        return input(Fore.YELLOW + Style.BRIGHT + text)
+# --- 使用Session State来管理数据 ---
+# 如果 'records' 不在会话内存中，说明是第一次加载，从文件读取
+if 'records' not in st.session_state:
+    st.session_state['records'] = load_data()
 
-    @staticmethod
-    def format_currency(amount):
-        """格式化金额，正数绿色，负数红色"""
-        color = Fore.GREEN if amount >= 0 else Fore.RED
-        return f"{color}{amount:,.2f}{Style.RESET_ALL}"
+# --- 侧边栏用于输入 ---
+st.sidebar.header("数据录入/修改")
+all_months = [f"{m}月" for m in range(Config.START_MONTH, Config.END_MONTH + 1)]
 
-class PerformanceTracker:
-    """程序主逻辑类，封装所有功能"""
+# 计算默认选中的月份
+# 如果有记录，默认选中下一个月；否则选中第一个月
+if st.session_state['records']:
+    next_month_index = len(st.session_state['records']) % len(all_months)
+else:
+    next_month_index = 0
 
-    def __init__(self):
-        self.records = {}
-        self.cumulative_profit = 0.0
-        self.total_deductions = 0.0
-        self._load_data()
+selected_month_str = st.sidebar.selectbox("选择月份", all_months, index=next_month_index)
+profit_input = st.sidebar.number_input(f"输入 {selected_month_str} 利润 (万元)", min_value=-1000.0, step=1.0, format="%.2f")
 
-    def _load_data(self):
-        """从JSON文件加载数据，如果文件不存在则初始化"""
-        if os.path.exists(Config.DATA_FILE):
-            try:
-                with open(Config.DATA_FILE, 'r', encoding='utf-8') as f:
-                    # 将json中的字符串key转为integer key
-                    self.records = {int(k): v for k, v in json.load(f).items()}
-                Display.success(f"✅ 成功加载数据: {Config.DATA_FILE}")
-                self._recalculate_totals()
-            except (json.JSONDecodeError, IOError) as e:
-                Display.error(f"⚠️ 加载文件失败: {e}。将以全新状态开始。")
-                self.records = {}
-        else:
-            Display.info("ℹ️ 未找到历史数据文件，将开始新的记录。")
-
-    def _save_data(self):
-        """将当前数据保存到JSON文件"""
-        try:
-            with open(Config.DATA_FILE, 'w', encoding='utf-8') as f:
-                json.dump(self.records, f, ensure_ascii=False, indent=4)
-        except IOError as e:
-            Display.error(f"❌ 严重错误：无法保存数据到文件！ {e}")
-
-    def _recalculate_totals(self):
-        """根据现有记录完全重新计算累计利润和总扣款，确保数据一致性"""
-        self.cumulative_profit = 0.0
-        self.total_deductions = 0.0
-        # 按月份排序进行计算
-        sorted_months = sorted(self.records.keys())
-        for month in sorted_months:
-            record = self.records[month]
-            self.cumulative_profit += record['actual_profit']
-            if record['performance_diff'] < 0:
-                self.total_deductions += abs(record['performance_diff'])
-
-    def _get_profit_input(self, prompt_text):
-        """获取用户输入的利润，并进行验证"""
-        while True:
-            try:
-                profit_input = Display.prompt(prompt_text)
-                return float(profit_input) * 10000
-            except ValueError:
-                Display.error("   输入无效，请输入一个数字 (例如: 19.5 或 -2.5 代表亏损)。")
-
-    def _update_month_record(self, month, actual_profit):
-        """更新或创建一个月的记录"""
-        performance_diff = actual_profit - Config.MONTHLY_TARGET
-        self.records[month] = {
-            "actual_profit": actual_profit,
-            "performance_diff": performance_diff
-        }
-        Display.success(f"   {month}月数据已更新。")
-
-    def _display_progress(self):
-        """显示当前的总体进度"""
-        Display.sub_header("当前年度进度")
-        print(f"  累计利润: {Display.format_currency(self.cumulative_profit)}")
-        
-        remaining_to_target = Config.ANNUAL_TARGET - self.cumulative_profit
-        if remaining_to_target > 0:
-            print(f"  距离年度目标还差: {Display.format_currency(remaining_to_target)}")
-        else:
-            Display.success(f"  已超越年度目标！超出金额: {Display.format_currency(-remaining_to_target)}")
+if st.sidebar.button("💾 保存/更新", use_container_width=True):
+    month = int(selected_month_str.replace('月',''))
+    actual_profit = profit_input * 10000
+    performance_diff = actual_profit - Config.MONTHLY_TARGET
     
-    def run(self):
-        """程序主循环"""
-        Display.header(f"{Config.START_YEAR}年度利润绩效跟踪系统 V2.0")
-        self._display_progress()
+    # 直接更新会话内存中的数据
+    st.session_state['records'][month] = {
+        "actual_profit": actual_profit,
+        "performance_diff": performance_diff
+    }
+    # 将更新后的内存数据保存到文件
+    save_data(st.session_state['records'])
+    st.sidebar.success(f"{selected_month_str} 数据已保存！") # 在这里，因为我们用了session state，success消息通常不会引起错误
+    # 如果想更保险，也可以换成 st.rerun()
 
-        while True:
-            next_month = self._get_next_month()
+# --- 主面板用于显示 ---
+# 直接从会话内存中读取数据来展示，不再需要每次都计算
+records_to_display = st.session_state['records']
+cumulative_profit = sum(rec['actual_profit'] for rec in records_to_display.values())
+total_deductions = sum(abs(rec['performance_diff']) for rec in records_to_display.values() if rec['performance_diff'] < 0)
+remaining_to_target = Config.ANNUAL_TARGET - cumulative_profit
 
-            if next_month > Config.END_MONTH:
-                Display.success("\n🎉 所有月份的数据都已录入完毕！")
-                self._display_final_summary()
-                break
+# KPI指标卡
+col1, col2, col3 = st.columns(3)
+# ... (这部分显示逻辑和之前完全一样) ...
+col1.metric("累计利润", f"{cumulative_profit:,.2f} 元")
+col2.metric("年度目标差距", f"{remaining_to_target:,.2f} 元", delta=f"{cumulative_profit - Config.ANNUAL_TARGET:,.2f}", delta_color="normal")
+col3.metric("累计绩效扣减", f"{total_deductions:,.2f} 元")
 
-            action = Display.prompt(
-                f"\n请选择操作: [E] 输入{next_month}月数据, [M] 修改历史数据, [Q] 退出程序 -> "
-            ).upper()
 
-            if action == 'E':
-                self._handle_new_entry(next_month)
-            elif action == 'M':
-                self._handle_edit_entry()
-            elif action == 'Q':
-                break
-            else:
-                Display.error("无效的指令，请输入 E, M, 或 Q。")
-        
-        print("\n感谢使用，程序已退出。")
+# ... (后续的表格显示和年终总结代码和之前完全一样, 只是数据源是 records_to_display) ...
+st.markdown("---")
+st.subheader("月度数据详情")
+if records_to_display:
+    df_data = []
+    for m in sorted(records_to_display.keys()):
+        rec = records_to_display[m]
+        df_data.append({
+            "月份": f"{m}月",
+            "实际利润 (元)": rec['actual_profit'],
+            "月度目标 (元)": Config.MONTHLY_TARGET,
+            "月度绩效 (元)": rec['performance_diff']
+        })
+    df = pd.DataFrame(df_data)
+    st.dataframe(df.style.format("{:,.2f}", subset=["实际利润 (元)", "月度目标 (元)", "月度绩效 (元)"]), use_container_width=True)
 
-    def _get_next_month(self):
-        """计算下一个需要输入的月份"""
-        if not self.records:
-            return Config.START_MONTH
-        last_recorded_month = max(self.records.keys())
-        return last_recorded_month + 1
-
-    def _handle_new_entry(self, month):
-        """处理新月份的数据录入"""
-        Display.sub_header(f"录入 {month} 月数据")
-        actual_profit = self._get_profit_input(f"  请输入 {month} 月的实际利润 (万元): ")
-        self._update_month_record(month, actual_profit)
-        self._recalculate_totals()
-        self._save_data()
-        self._display_progress()
-
-    def _handle_edit_entry(self):
-        """处理历史数据的修改"""
-        if not self.records:
-            Display.error("目前没有任何历史数据可以修改。")
-            return
-            
-        Display.sub_header("修改历史数据")
-        try:
-            month_to_edit = int(Display.prompt(f"  请输入要修改的月份 ({min(self.records.keys())}-{max(self.records.keys())}): "))
-            if month_to_edit not in self.records:
-                Display.error(f"  错误：{month_to_edit}月的数据不存在。")
-                return
-
-            old_profit_str = f"{self.records[month_to_edit]['actual_profit']/10000:.2f} 万元"
-            Display.info(f"  {month_to_edit}月的当前利润为: {old_profit_str}")
-            
-            new_profit = self._get_profit_input(f"  请输入 {month_to_edit} 月的新利润 (万元): ")
-            self._update_month_record(month_to_edit, new_profit)
-            
-            Display.info("  正在重新计算全年数据...")
-            self._recalculate_totals()
-            self._save_data()
-            Display.success("  数据修改并保存成功！")
-            self._display_progress()
-
-        except ValueError:
-            Display.error("  无效的月份，请输入一个数字。")
-            
-    def _display_final_summary(self):
-        """显示最终的年度总结报告"""
-        Display.header("2025年度业绩总结报告")
-        
-        # 打印表头
-        print(f"{'月份':<6}{'实际利润':>18}{'月度目标':>18}{'月度绩效':>20}")
-        print("-" * 65)
-
-        # 逐月打印数据
-        for month in range(Config.START_MONTH, Config.END_MONTH + 1):
-            if month in self.records:
-                rec = self.records[month]
-                print(f"{str(month)+'月':<5}"
-                      f"{Display.format_currency(rec['actual_profit']):>25}"
-                      f"{Display.format_currency(Config.MONTHLY_TARGET):>25}"
-                      f"{Display.format_currency(rec['performance_diff']):>28}")
-            else:
-                # 如果某个月数据缺失，也显示出来
-                 print(f"{str(month)+'月':<5}{Fore.YELLOW+' (数据缺失)':>25}")
-        
-        print("-" * 65)
-        print(f"全年累计利润: {Display.format_currency(self.cumulative_profit):>25}")
-        print(f"年度利润目标: {Display.format_currency(Config.ANNUAL_TARGET):>25}")
-        
-        # 最终奖金核算
-        Display.sub_header("年终奖金核算")
-        if self.cumulative_profit >= Config.ANNUAL_TARGET:
-            Display.success("✅ 恭喜！已达成年度利润目标！")
-            
-            clawback_bonus = self.total_deductions
-            print(f"  - 补发扣减绩效: {Display.format_currency(clawback_bonus)}")
-
-            surplus_profit = self.cumulative_profit - Config.ANNUAL_TARGET
-            surplus_bonus = (surplus_profit // Config.SURPLUS_BONUS_THRESHOLD) * Config.SURPLUS_BONUS_AMOUNT
-            print(f"  - 超额达成奖励: {Display.format_currency(surplus_bonus)}")
-            
-            total_bonus = clawback_bonus + surplus_bonus
-            print(Style.BRIGHT + f"  年终总奖励合计: {Display.format_currency(total_bonus)}")
-        else:
-            Display.error("❌ 未能达成年度利润目标。")
-            print(f"  全年累计被扣减的绩效 {Display.format_currency(self.total_deductions)} 将不予补发。")
-
-if __name__ == "__main__":
-    tracker = PerformanceTracker()
-    tracker.run()
+if len(records_to_display) >= Config.END_MONTH - Config.START_MONTH + 1:
+    #... (年终总结逻辑不变) ...
+    st.subheader("🏆 年终奖金核算")
+    if cumulative_profit >= Config.ANNUAL_TARGET:
+        clawback = total_deductions
+        surplus = ((cumulative_profit - Config.ANNUAL_TARGET) // Config.SURPLUS_BONUS_THRESHOLD) * Config.SURPLUS_BONUS_AMOUNT
+        total_bonus = clawback + surplus
+        st.success(f"恭喜！已达成年度目标！")
+        st.markdown(f"""
+        - **补发扣减绩效**: <font color='green'>{clawback:,.2f} 元</font>
+        - **超额达成奖励**: <font color='green'>{surplus:,.2f} 元</font>
+        - **年终总奖励合计**: <font color='blue' style='font-weight:bold;'>{total_bonus:,.2f} 元</font>
+        """, unsafe_allow_html=True)
+    else:
+        st.error("未能达成年度利润目标，不补发扣减绩效。")
